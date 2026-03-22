@@ -111,8 +111,6 @@ func main() {
 
 			ctx := context.Background()
 
-			fmt.Println("QUALLL A EMPRESAA ", i[4])
-
 			resp, err := aiClient.CreateChatCompletion(
 				ctx,
 				openai.ChatCompletionRequest{
@@ -120,7 +118,7 @@ func main() {
 					Messages: []openai.ChatCompletionMessage{
 						{
 							Role:    openai.ChatMessageRoleUser,
-							Content: "QUal o nome correto dessa empresa? ME devolva apenas o nome na resposta sem texto adicional SUBSTITUINDO OS ESPAÇOS POR ESTE CARACTERE +" + i[4],
+							Content: "QUal o nome correto dessa empresa? ME devolva apenas o nome na resposta sem texto adicional SUBSTITUINDO OS ESPAÇOS POR ESTE CARACTERE +, se possível, mande apenas uma palavra exemplo HUB*NETSHOES -> NETSHOES, evite deixar simbolos diferentes de letras ou o + citado, pense no nome que essa empresa é socialmente conhecida" + i[4],
 						},
 					},
 				},
@@ -130,8 +128,6 @@ func main() {
 			}
 			response := resp.Choices[0].Message.Content
 
-			fmt.Println(response)
-
 			pw, _ := playwright.Run()
 
 			browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
@@ -140,22 +136,25 @@ func main() {
 
 			page, _ := browser.NewPage()
 
-			urlEmployeInfo := fmt.Sprintf("http://cnpj.info/busca?q=%s", response)
+			urlEmployeInfo := fmt.Sprintf("http://cnpj.info/%s", response)
 
 			page.Goto(urlEmployeInfo)
 
 			html, _ := page.Content()
 
-			re := regexp.MustCompile(`href="\/(\d{14})"`)
-			res := re.FindStringSubmatch(html)
+			res := strings.Split(html, "li>")
+			var cnpj []string
 
-			fixCnpj := cleanCNPJ(res[1])
-
-			fmt.Println("CNP", fixCnpj)
+			for _, item := range res {
+				if strings.Contains(strings.ToLower(item), strings.ToLower(response)) {
+					re := regexp.MustCompile(`href="\/(\d{14})"`)
+					cnpj = re.FindStringSubmatch(item)
+				}
+			}
+			fixCnpj := cleanCNPJ(cnpj[0])
 
 			url := fmt.Sprintf("https://api.opencnpj.org/%s", fixCnpj)
 
-			fmt.Print(url)
 			reqApi, err := http.NewRequest("GET", url, nil)
 			if err != nil {
 				log.Println("Erro ao criar request API:", err)
@@ -173,7 +172,6 @@ func main() {
 				log.Fatal(err)
 			}
 
-			fmt.Println("Resposta da API:", string(jsonRes))
 			var empresa Empresa
 
 			err = json.Unmarshal(jsonRes, &empresa)
@@ -207,9 +205,6 @@ func main() {
 				ano := strings.TrimSpace(row[2])
 
 				if codigo == cnae && ano == "2022" {
-					fmt.Println("CNAE:", cnae)
-					fmt.Println("Quantidade de CNPJ:", row[3])
-					fmt.Println("Receita Bruta:", row[4])
 
 					qtdCnpj, err := strconv.ParseFloat(strings.TrimSpace(strings.ReplaceAll(row[3], ",", "")), 64)
 					if err != nil {
@@ -224,13 +219,11 @@ func main() {
 					}
 
 					estimatedProfit = math.Round((totalProfit/qtdCnpj)*100) / 100
-					fmt.Printf("Lucro Estimado para CNAE %s: %.2f\n", cnae, estimatedProfit)
 
 					break
 				}
 			}
 
-			fmt.Println("Lucro estimado", estimatedProfit)
 			layout := "02/01/2006"
 
 			date, err := time.Parse(layout, i[0])
@@ -238,11 +231,6 @@ func main() {
 				fmt.Println("Erro ao converter depois colocar dare ali:", err)
 				return
 			}
-
-			fmt.Println("O QUE VEMMM NO PARCELA", i[5])
-
-			fmt.Println(counter)
-			fmt.Println(i[1])
 
 			_, err = db.Exec(
 				"INSERT INTO userCreditData (lineId, name) VALUES ($1, $2)",
