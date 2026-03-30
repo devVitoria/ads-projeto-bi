@@ -19,7 +19,6 @@ import (
 
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
-	"github.com/playwright-community/playwright-go"
 	"github.com/sashabaranov/go-openai"
 
 	"github.com/xuri/excelize/v2"
@@ -51,6 +50,19 @@ func main() {
 		CNAEPrincipal string `json:"cnae_principal"`
 	}
 
+	type CnpjRes struct {
+		Resultados []struct {
+			CNPJBase string `json:"cnpj_base"`
+			Nome     string `json:"nome_empresarial"`
+		} `json:"resultados_paginacao"`
+	}
+
+	type finalCnpjRes struct {
+		Res []struct {
+			CompleteCnpj string `json:"cnpj"`
+		} `json:"resultados_paginacao"`
+	}
+
 	type Info struct {
 		Quantidade string
 		Receita    string
@@ -77,7 +89,7 @@ func main() {
 	defer file.Close()
 	counter := 0
 
-	connStr := "user=postgres password=masterKey host=localhost port=5432 dbname=bigo sslmode=disable"
+	connStr := os.Getenv("db")
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
@@ -105,6 +117,8 @@ func main() {
 			fmt.Println(err)
 		}
 
+		fmt.Println("LINHA", counter)
+
 		if counter != 0 {
 
 			aiClient := openai.NewClient(apiKey)
@@ -116,112 +130,140 @@ func main() {
 				openai.ChatCompletionRequest{
 					Model: openai.GPT4oMini,
 					Messages: []openai.ChatCompletionMessage{
+
 						{
-							Role:    openai.ChatMessageRoleUser,
-							Content: "QUal o nome correto dessa empresa? ME devolva apenas o nome na resposta sem texto adicional SUBSTITUINDO OS ESPAÇOS POR ESTE CARACTERE +, se possível, mande apenas uma palavra exemplo HUB*NETSHOES -> NETSHOES, evite deixar simbolos diferentes de letras ou o + citado, pense no nome que essa empresa é socialmente conhecida" + i[4],
+							Role:    "system",
+							Content: os.Getenv("AISystemPrompt"),
+						},
+						{
+							Role:    "user",
+							Content: os.Getenv("AIUserPrompt") + i[4],
 						},
 					},
 				},
 			)
+
 			if err != nil {
 				log.Println("Erro OpenAI:", err)
 			}
 			response := resp.Choices[0].Message.Content
 
-			pw, _ := playwright.Run()
+			firtsCnpjNumbers, err := http.Get("https://api.cnpj.pw/razao_social/" + response)
 
-			browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-				Headless: playwright.Bool(true),
-			})
-
-			page, _ := browser.NewPage()
-
-			urlEmployeInfo := fmt.Sprintf("http://cnpj.info/%s", response)
-
-			page.Goto(urlEmployeInfo)
-
-			html, _ := page.Content()
-
-			res := strings.Split(html, "li>")
-			var cnpj []string
-
-			for _, item := range res {
-				if strings.Contains(strings.ToLower(item), strings.ToLower(response)) {
-					re := regexp.MustCompile(`href="\/(\d{14})"`)
-					cnpj = re.FindStringSubmatch(item)
-				}
-			}
-			fixCnpj := cleanCNPJ(cnpj[0])
-
-			url := fmt.Sprintf("https://api.opencnpj.org/%s", fixCnpj)
-
-			reqApi, err := http.NewRequest("GET", url, nil)
 			if err != nil {
-				log.Println("Erro ao criar request API:", err)
+				log.Println("Erro ao obter CNPJ:", err)
 				continue
 			}
 
-			respJson, err := client.Do(reqApi)
-			if err != nil {
-				log.Println("Erro na API:", err)
-				continue
-			}
+			defer firtsCnpjNumbers.Body.Close()
 
-			jsonRes, err := io.ReadAll(respJson.Body)
-			if err != nil {
-				log.Fatal(err)
-			}
+			var data CnpjRes
+			var finalCnpj finalCnpjRes
 
-			var empresa Empresa
+			json.NewDecoder(firtsCnpjNumbers.Body).Decode(&data)
 
-			err = json.Unmarshal(jsonRes, &empresa)
-			if err != nil {
-				log.Println("Erro ao fazer unmarshal:", err)
-				continue
-			}
+			if len(data.Resultados) > 0 {
 
-			f, err := excelize.OpenFile("Tab_07_Subclasse_Ano.xlsx")
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-			defer f.Close()
+				geFinalCnpj, err := http.Get("https://api.cnpj.pw/cnpj_base/" + data.Resultados[0].CNPJBase)
 
-			rows, err := f.GetRows("Tabela_07")
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			cnae := formatCNAE(empresa.CNAEPrincipal)
-			var estimatedProfit float64
-
-			for i, row := range rows {
-				if i == 0 || len(row) < 6 {
+				if err != nil {
+					log.Println("Erro ao obter CNPJ completo:", err)
 					continue
 				}
 
-				codigo := strings.TrimSpace(row[0])
-				ano := strings.TrimSpace(row[2])
+				json.NewDecoder(geFinalCnpj.Body).Decode(&finalCnpj)
 
-				if codigo == cnae && ano == "2022" {
+				defer geFinalCnpj.Body.Close()
 
-					qtdCnpj, err := strconv.ParseFloat(strings.TrimSpace(strings.ReplaceAll(row[3], ",", "")), 64)
-					if err != nil {
-						fmt.Println("Erro:", err)
-						return
-					}
+			}
+			fmt.Println("ai.response", response)
 
-					totalProfit, err := strconv.ParseFloat(strings.TrimSpace(strings.ReplaceAll(row[4], ",", "")), 64)
-					if err != nil {
-						fmt.Println("Erro:", err)
-						return
-					}
+			var fixCnpj string
+			var cnae string
+			var estimatedProfit float64
 
-					estimatedProfit = math.Round((totalProfit/qtdCnpj)*100) / 100
+			if len(finalCnpj.Res) > 0 {
+				fmt.Println(finalCnpj.Res[0].CompleteCnpj)
 
-					break
+				if len(finalCnpj.Res) == 0 {
+					log.Println("CNPJ não encontrado para a empresa:", response)
+					continue
 				}
+
+				fixCnpj = cleanCNPJ(finalCnpj.Res[0].CompleteCnpj)
+
+				fmt.Println("Cnpj tratado", fixCnpj)
+
+				url := fmt.Sprintf("https://api.opencnpj.org/%s", fixCnpj)
+
+				reqApi, err := http.NewRequest("GET", url, nil)
+				if err != nil {
+					log.Println("Erro ao criar request API:", err)
+					continue
+				}
+
+				respJson, err := client.Do(reqApi)
+				if err != nil {
+					log.Println("Erro na API:", err)
+					continue
+				}
+
+				jsonRes, err := io.ReadAll(respJson.Body)
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				var empresa Empresa
+
+				err = json.Unmarshal(jsonRes, &empresa)
+				if err != nil {
+					log.Println("Erro ao fazer unmarshal:", err)
+					continue
+				}
+
+				f, err := excelize.OpenFile("Tab_07_Subclasse_Ano.xlsx")
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				defer f.Close()
+
+				rows, err := f.GetRows("Tabela_07")
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+
+				cnae = formatCNAE(empresa.CNAEPrincipal)
+
+				for i, row := range rows {
+					if i == 0 || len(row) < 6 {
+						continue
+					}
+
+					codigo := strings.TrimSpace(row[0])
+					ano := strings.TrimSpace(row[2])
+
+					if codigo == cnae && ano == "2022" {
+
+						qtdCnpj, err := strconv.ParseFloat(strings.TrimSpace(strings.ReplaceAll(row[3], ",", "")), 64)
+						if err != nil {
+							fmt.Println("Erro:", err)
+							return
+						}
+
+						totalProfit, err := strconv.ParseFloat(strings.TrimSpace(strings.ReplaceAll(row[4], ",", "")), 64)
+						if err != nil {
+							fmt.Println("Erro:", err)
+							return
+						}
+
+						estimatedProfit = math.Round((totalProfit/qtdCnpj)*100) / 100
+
+						break
+					}
+				}
+
 			}
 
 			layout := "02/01/2006"
